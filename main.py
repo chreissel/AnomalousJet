@@ -48,16 +48,17 @@ class MyProcessor(processor.ProcessorABC):
                 (2*np.log(fatjets.msoftdrop/fatjets.pt) >-8) &
                 (2*np.log(fatjets.msoftdrop/fatjets.pt) <-1) &
                 (fatjets.jetId>0)]
-        
+        candidatejet = ak.firsts(fatjets)
+
         jets = events.Jet
         jets = jets[(jets.pt > 30) &
                 (np.abs(jets.eta) < 2.5) &
                 (jets.jetId > 0)] # check what is happening with the puID in Run3?
 
         #bjets = jets[]
-        #opp_hemisphere_jets = jets[(fatjets[:,0].delta_phi(jets) > np.pi/2.)]
-        #idx = ak.argsort(opp_hemisphere_jets.btagDeepFlavB, axis=1, ascending=False)
-        #opp_hemisphere_btag = ak.fill_none(ak.pad_none(opp_hemisphere_jets[idx].btagDeepFlavB, 1, clip=True),0.0)[:,0]
+        opp_hemisphere_jets = jets[(jets.delta_phi(candidatejet) > np.pi/2.)]
+        idx = ak.argsort(opp_hemisphere_jets.btagDeepFlavB, axis=1, ascending=False)
+        opp_hemisphere_btag = ak.fill_none(ak.firsts(opp_hemisphere_jets[idx].btagDeepFlavB),0.0)
 
         # event selection
         from coffea.analysis_tools import PackedSelection
@@ -66,13 +67,13 @@ class MyProcessor(processor.ProcessorABC):
                 {
                     "Filter": filters,
                     "Triggers": triggers,
-                    "Veto Leptons": ((ak.num(loose_muons)==0) & (ak.num(electrons)==0) & (ak.num(taus)==0)),
-                    "Anti-top cuts": ((events.MET.pt < 140.) & (ak.num(jets)<6)),
                     ">0 Fatjets": (ak.num(fatjets)>0),
+                    "Veto Leptons": ((ak.num(loose_muons)==0) & (ak.num(electrons)==0) & (ak.num(taus)==0)),
+                    "Anti-top cuts": ((events.MET.pt < 140.) & (ak.num(jets)<6)) & (opp_hemisphere_btag<0.3040),
                 }
         )
         print(SR)
-        cutflow = SR.cutflow()
+        cutflow = SR.cutflow("Filter", "Triggers", ">0 Fatjets", "Veto Leptons", "Anti-top cuts")
         cutflow.print()
        
         def make_inputs(fatjets):
@@ -83,10 +84,9 @@ class MyProcessor(processor.ProcessorABC):
                     0.0,
                 )
             
-            inputs = {
-                    # per-jet features
-                    "fatjet": ak.zip(
+            inputs = ak.zip(
                     {
+                    # per-jet features
                         "rho": np.log(fatjets.msoftdrop/fatjets.pt),
                         "tau21": fatjets.tau2/fatjets.tau1,
                         "tau32": fatjets.tau3/fatjets.tau2,
@@ -94,10 +94,7 @@ class MyProcessor(processor.ProcessorABC):
                         "sqrttau21_tau1": np.sqrt(fatjets.tau2/fatjets.tau1)/fatjets.tau1,
                         "nConst": fatjets.nConstituents,
                         "btag": fatjets.particleNetMD_Xbb, #particleNet_HbbvsQCD
-                    }),
                     # per-constituent features
-                    "pfconst": ak.zip(
-                    {
                         "deta": pad(fatjets.eta - fatjets.constituents.pf.eta),
                         "dphi": pad(fatjets.delta_phi(fatjets.constituents.pf)),
                         "dr": pad(fatjets.delta_r(fatjets.constituents.pf)),
@@ -105,15 +102,15 @@ class MyProcessor(processor.ProcessorABC):
                         "lptf": pad(np.log(fatjets.constituents.pf.pt / fatjets.pt)),
                         "f1": pad(np.log(np.abs(fatjets.constituents.pf.d0) + 1)),
                         "f2": pad(np.log(np.abs(fatjets.constituents.pf.dz) + 1)), 
-                    }),
-                    }
+                    }, depth_limit=1)
             return inputs
 
 
         # apply event selection & consider only highest pt FatJet
         selc_fatjets = fatjets[SR.all()][:,0] # SR events (w/o btag) and highest pt jet
         inputs = make_inputs(selc_fatjets)
-
+       
+        ak.to_parquet(inputs, dataset)
         return {
             dataset: {
                 "entries": ak.num(events[SR.all()],axis=0),
@@ -143,6 +140,8 @@ if __name__ == '__main__':
     p = MyProcessor()
     out = p.process(events)
     (computed, ) = dask.compute(out)
+
+    
 
     import pdb
     pdb.set_trace()
