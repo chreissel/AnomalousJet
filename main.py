@@ -3,9 +3,12 @@ from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
 from coffea.nanoevents.schemas import PFNanoAODSchema
 import numpy as np
 from coffea.ml_tools.torch_wrapper import torch_wrapper
+from coffea.analysis_tools import Weights, PackedSelection
 
 from coffea import processor
 import dask
+
+lumi = 4148.0
 
 class MyProcessor(processor.ProcessorABC):
     def __init__(self):
@@ -13,6 +16,7 @@ class MyProcessor(processor.ProcessorABC):
 
     def process(self, events):
         dataset = events.metadata["dataset"]
+        XS = events.metadata["XS"]
 
         # event filters
         filters = (events.Flag.goodVertices & events.Flag.globalSuperTightHalo2016Filter & events.Flag.HBHENoiseFilter & events.Flag.HBHENoiseIsoFilter & events.Flag.EcalDeadCellTriggerPrimitiveFilter & events.Flag.BadPFMuonFilter & events.Flag.BadPFMuonDzFilter & events.Flag.eeBadScFilter & events.Flag.ecalBadCalibFilter)
@@ -55,13 +59,16 @@ class MyProcessor(processor.ProcessorABC):
                 (np.abs(jets.eta) < 2.5) &
                 (jets.jetId > 0)] # check what is happening with the puID in Run3?
 
-        #bjets = jets[]
         opp_hemisphere_jets = jets[(jets.delta_phi(candidatejet) > np.pi/2.)]
         idx = ak.argsort(opp_hemisphere_jets.btagDeepFlavB, axis=1, ascending=False)
         opp_hemisphere_btag = ak.fill_none(ak.firsts(opp_hemisphere_jets[idx].btagDeepFlavB),0.0)
 
+        # Weights
+        sumw = ak.sum(events.genWeight)
+        weights = {}
+        weights["genweight"] = (events.genWeight/sumw*lumi*XS)
+
         # event selection
-        from coffea.analysis_tools import PackedSelection
         SR = PackedSelection()
         SR.add_multiple(
                 {
@@ -76,7 +83,7 @@ class MyProcessor(processor.ProcessorABC):
         cutflow = SR.cutflow("Filter", "Triggers", ">0 Fatjets", "Veto Leptons", "Anti-top cuts")
         cutflow.print()
        
-        def make_inputs(fatjets):
+        def make_inputs(fatjets, weights):
 
             def pad(arr):
                 return ak.fill_none(
@@ -94,6 +101,7 @@ class MyProcessor(processor.ProcessorABC):
                         "sqrttau21_tau1": np.sqrt(fatjets.tau2/fatjets.tau1)/fatjets.tau1,
                         "nConst": fatjets.nConstituents,
                         "btag": fatjets.particleNetMD_Xbb, #particleNet_HbbvsQCD
+                        "weight": weights,
                     # per-constituent features
                         "deta": pad(fatjets.eta - fatjets.constituents.pf.eta),
                         "dphi": pad(fatjets.delta_phi(fatjets.constituents.pf)),
@@ -106,9 +114,10 @@ class MyProcessor(processor.ProcessorABC):
             return inputs
 
 
+        cut = SR.all()
         # apply event selection & consider only highest pt FatJet
-        selc_fatjets = fatjets[SR.all()][:,0] # SR events (w/o btag) and highest pt jet
-        inputs = make_inputs(selc_fatjets)
+        selc_fatjets = fatjets[cut][:,0] # SR events (w/o btag) and highest pt jet
+        inputs = make_inputs(selc_fatjets, weights["genweight"][cut])
        
         ak.to_parquet(inputs, dataset)
         return {
@@ -134,14 +143,10 @@ if __name__ == '__main__':
         #schemaclass=NanoAODSchema,
         schemaclass=PFNanoAODSchema,
         #metadata={"dataset": "Zprime"},
-        metadata={"dataset": "QCD"},
+        metadata={"dataset": "QCD", "XS": 1118.0}, # XS taken from https://github.com/jeffkrupa/zprime-bamboo/blob/main/samples_2017_jet.yml
     ).events()
 
     p = MyProcessor()
     out = p.process(events)
     (computed, ) = dask.compute(out)
 
-    
-
-    import pdb
-    pdb.set_trace()
