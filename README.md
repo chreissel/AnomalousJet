@@ -30,4 +30,12 @@ After each login, activate the miniforge installation and the coffea environment
 source /home/user/XXX/miniforge3/bin/activate
 conda activate coffea
 ```
-    
+
+## Example Files
+The code aims to dump the inputs for an anomalous jet search and save them to parquet files. These files can be opened with the python package `awkward`. An example file can be found [here]().
+```
+
+```
+
+## Training code
+The QUAK training repository can be found [here](https://github.com/SangeonPark/QUAK/).
