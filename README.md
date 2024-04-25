@@ -32,9 +32,18 @@ conda activate coffea
 ```
 
 ## Example Files
-The code aims to dump the inputs for an anomalous jet search and save them to parquet files. These files can be opened with the python package `awkward`. An example file can be found [here]().
+The code aims to dump the inputs for an anomalous jet search and save them to parquet files. These files can be opened with the python package `awkward`. An example file can be found [here](AnomalousJet/test_QCD.parquet).<br>
+Information from the file can be loaded like demonstrated in the following:
 ```
-
+import awkward as ak
+test = ak.from_parquet("test_QCD.parquet")
+print(test.fields) # to get all properties stored in the array
+feature = test.rho
+```
+The awkward arrays can also coverted to NumPy arrays:
+```
+print(feature)
+array = ak.to_numpy(feature)
 ```
 
 ## Training code
