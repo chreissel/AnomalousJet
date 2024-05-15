@@ -2,7 +2,6 @@ import awkward as ak
 from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
 from coffea.nanoevents.schemas import PFNanoAODSchema
 import numpy as np
-from coffea.ml_tools.torch_wrapper import torch_wrapper
 from coffea.analysis_tools import Weights, PackedSelection
 
 from coffea import processor
@@ -119,16 +118,15 @@ class MyProcessor(processor.ProcessorABC):
         selc_fatjets = fatjets[cut][:,0] # SR events (w/o btag) and highest pt jet
         inputs = make_inputs(selc_fatjets, weights["genweight"][cut])
        
-        ak.to_parquet(inputs, dataset)
-        return {
-            dataset: {
+        #ak.to_parquet(inputs, dataset)
+        return {      
                 "entries": ak.num(events[SR.all()],axis=0),
                 "inputs": inputs,
                 }
-            }
 
     def postprocess(self,accumulator):
         pass
+        #return accumulator
 
 
 
