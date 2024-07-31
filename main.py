@@ -3,12 +3,40 @@ from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
 from coffea.nanoevents.schemas import PFNanoAODSchema
 import numpy as np
 from coffea.analysis_tools import Weights, PackedSelection
+from coffea import util
 
 from coffea import processor
 import dask
+import dask_awkward as dak
+import correctionlib
+import json
 
 lumi = 4148.0
 
+# function for msoftdrop correction -> TODO: move to separate correction file
+msdcorr = {}
+msdcorr['2017'] = correctionlib.CorrectionSet.from_file('msdcorr_2017.json')
+def corrected_msoftdrop(fatjets, year):
+    msdraw = np.sqrt(
+        np.maximum(
+            0.0,
+            (fatjets.subjets * (1 - fatjets.subjets.rawFactor)).sum().mass2,
+        )
+    )
+    msoftdrop = fatjets.msoftdrop
+    msdfjcorr = msdraw / (1 - fatjets.rawFactor)
+
+    if year=='2016APV': year='2016'
+    corr = msdcorr[year]["msdfjcorr"].evaluate(
+        (msdfjcorr / fatjets.pt),
+        (np.log(fatjets.pt)),
+        (fatjets.eta),
+    )
+
+    corrected_mass = msdfjcorr * corr
+    return corrected_mass
+
+# main processor
 class MyProcessor(processor.ProcessorABC):
     def __init__(self):
         pass
@@ -17,13 +45,13 @@ class MyProcessor(processor.ProcessorABC):
         dataset = events.metadata["dataset"]
         XS = events.metadata["XS"]
 
-        # event filters
+        # Event filters
         filters = (events.Flag.goodVertices & events.Flag.globalSuperTightHalo2016Filter & events.Flag.HBHENoiseFilter & events.Flag.HBHENoiseIsoFilter & events.Flag.EcalDeadCellTriggerPrimitiveFilter & events.Flag.BadPFMuonFilter & events.Flag.BadPFMuonDzFilter & events.Flag.eeBadScFilter & events.Flag.ecalBadCalibFilter)
-        # event triggers
+        # Event triggers
         triggers = (events.HLT.PFHT1050 | events.HLT.PFJet500 | events.HLT.AK8PFJet500 | events.HLT.AK8PFHT800_TrimMass50 | events.HLT.AK8PFJet400_TrimMass30 | events.HLT.AK8PFJet420_TrimMass30) 
 
 
-        # basic lepton selection
+        # Basic lepton selection
         muons = events.Muon
         loose_muons = muons[(muons.pt > 10.) &
                 (np.abs(muons.eta) < 2.4) &
@@ -43,13 +71,14 @@ class MyProcessor(processor.ProcessorABC):
                 (taus.idDeepTau2017v2p1VSmu >= 8)]
 
 
-        # basic jet selection
+        # Basic jet selection
         fatjets = events.FatJet
-        fatjets = fatjets[(fatjets.pt > 400) &
+        fatjets['msdcorr'] = corrected_msoftdrop(fatjets, '2017')
+        fatjets = fatjets[(fatjets.pt > 600) &
                 (np.abs(fatjets.eta) < 2.5) &
-                (fatjets.msoftdrop > 40) &
-                (2*np.log(fatjets.msoftdrop/fatjets.pt) >-8) &
-                (2*np.log(fatjets.msoftdrop/fatjets.pt) <-1) &
+                (fatjets.msdcorr > 40) &
+                (2*np.log(fatjets.msdcorr/fatjets.pt) >-8) &
+                (2*np.log(fatjets.msdcorr/fatjets.pt) <-1) &
                 (fatjets.jetId>0)]
         candidatejet = ak.firsts(fatjets)
 
@@ -63,11 +92,10 @@ class MyProcessor(processor.ProcessorABC):
         opp_hemisphere_btag = ak.fill_none(ak.firsts(opp_hemisphere_jets[idx].btagDeepFlavB),0.0)
 
         # Weights
-        sumw = ak.sum(events.genWeight)
         weights = {}
-        weights["genweight"] = (events.genWeight/sumw*lumi*XS)
+        weights["genweight"] = events.genWeight
 
-        # event selection
+        # Event selection
         SR = PackedSelection()
         SR.add_multiple(
                 {
@@ -78,11 +106,12 @@ class MyProcessor(processor.ProcessorABC):
                     "Anti-top cuts": ((events.MET.pt < 140.) & (ak.num(jets)<6)) & (opp_hemisphere_btag<0.3040),
                 }
         )
-        print(SR)
+        #print(SR)
         cutflow = SR.cutflow("Filter", "Triggers", ">0 Fatjets", "Veto Leptons", "Anti-top cuts")
-        cutflow.print()
-       
-        def make_inputs(fatjets, weights):
+        #cutflow.print()
+     
+        # Training inputs for whatever downstream ML task
+        def make_inputs(fatjets, events):
 
             def pad(arr):
                 return ak.fill_none(
@@ -93,14 +122,14 @@ class MyProcessor(processor.ProcessorABC):
             inputs = ak.zip(
                     {
                     # per-jet features
-                        "rho": np.log(fatjets.msoftdrop/fatjets.pt),
+                        "rho": np.log(fatjets.msdcorr/fatjets.pt),
                         "tau21": fatjets.tau2/fatjets.tau1,
                         "tau32": fatjets.tau3/fatjets.tau2,
                         "tau43": fatjets.tau4/fatjets.tau3,
                         "sqrttau21_tau1": np.sqrt(fatjets.tau2/fatjets.tau1)/fatjets.tau1,
                         "nConst": fatjets.nConstituents,
                         "btag": fatjets.particleNetMD_Xbb, #particleNet_HbbvsQCD
-                        "weight": weights,
+                        "msdcorr": fatjets.msdcorr, #particleNet_HbbvsQCD
                     # per-constituent features
                         "deta": pad(fatjets.eta - fatjets.constituents.pf.eta),
                         "dphi": pad(fatjets.delta_phi(fatjets.constituents.pf)),
@@ -109,6 +138,12 @@ class MyProcessor(processor.ProcessorABC):
                         "lptf": pad(np.log(fatjets.constituents.pf.pt / fatjets.pt)),
                         "f1": pad(np.log(np.abs(fatjets.constituents.pf.d0) + 1)),
                         "f2": pad(np.log(np.abs(fatjets.constituents.pf.dz) + 1)), 
+                        "pdgId": pad(fatjets.constituents.pf.pdgId),
+                    # event identifiation & monitoring
+                        "event": events['event'],
+                        "run": events['run'],
+                        "luminosityBlock": events['luminosityBlock'],
+                        "weight": events.genWeight, 
                     }, depth_limit=1)
             return inputs
 
@@ -116,12 +151,23 @@ class MyProcessor(processor.ProcessorABC):
         cut = SR.all()
         # apply event selection & consider only highest pt FatJet
         selc_fatjets = fatjets[cut][:,0] # SR events (w/o btag) and highest pt jet
-        inputs = make_inputs(selc_fatjets, weights["genweight"][cut])
-       
-        #ak.to_parquet(inputs, dataset)
+        selc_events = events[cut]
+        inputs = make_inputs(selc_fatjets, selc_events)
+    
+        # Save all information needed for NPLM/ Monitoring
+        sumw = ak.sum(events.genWeight)
+        sumw_selc = ak.sum(events[cut].genWeight)
+        nevents = cutflow.result().nevcutflow[0]
+        nevents_selc = cutflow.result().nevcutflow[-1]
+
+        
         return {      
-                "entries": ak.num(events[SR.all()],axis=0),
+                #"entries": ak.num(events[SR.all()],axis=0),
+                #"genSumW": sumw,
+                #"weights": weights["genweight"], 
+                #"cutflow": cutflow,
                 "inputs": inputs,
+                "log": {'nevents':nevents, 'nevents_selc':nevents_selc, 'sumw':sumw, 'sumw_selc':sumw_selc},
                 }
 
     def postprocess(self,accumulator):
@@ -146,5 +192,13 @@ if __name__ == '__main__':
 
     p = MyProcessor()
     out = p.process(events)
-    (computed, ) = dask.compute(out)
+    to_compute = dak.to_parquet(out["inputs"],"QCD",compute=False)
+    dask.compute(to_compute)
+    log = {}
+    for l in out['log'].keys():
+        log[l] = float(out['log'][l].compute())
+    with open('QCD/monitor.json','w') as outfile:
+        json.dump(log, outfile)
+    import pdb
+    pdb.set_trace()
 
